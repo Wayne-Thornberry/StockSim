@@ -340,7 +340,7 @@ export async function simulateHistory(companies, startYear, endDate, config = {}
 
               // Commodity pricing: apply materials economy pressure
               let materialDrift = 0
-              if (isCommodity) {
+              if (c.type === 'commodity') {
                 const matKey = COMMODITY_MATERIAL_MAP[c.id] || null
                 if (matKey) {
                   materialDrift = getMaterialPressure(materialsState, matKey) * 0.002
