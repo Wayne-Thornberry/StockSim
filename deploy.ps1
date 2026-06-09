@@ -52,29 +52,29 @@ function Write-Step {
 
 function Write-OK {
     param([string]$Message)
-    Write-Host "    ✓ $Message" -ForegroundColor Green
+    Write-Host "    OK  $Message" -ForegroundColor Green
 }
 
 function Write-Warn {
     param([string]$Message)
-    Write-Host "    ⚠ $Message" -ForegroundColor Yellow
+    Write-Host "    WARN $Message" -ForegroundColor Yellow
 }
 
 function Write-Err {
     param([string]$Message)
-    Write-Host "    ✗ $Message" -ForegroundColor Red
+    Write-Host "    ERR $Message" -ForegroundColor Red
 }
 
 # ──────────────────────────────────────────────
 # 1. Build
 # ──────────────────────────────────────────────
 if (-not $SkipBuild) {
-    Write-Step 'Building project (npm run build) …'
+    Write-Step 'Building project (npm run build) ...'
     Push-Location $PSScriptRoot
     try {
         npm ci 2>&1 | Out-Null
         if ($LASTEXITCODE -ne 0) {
-            Write-Warn 'npm ci failed – falling back to npm install'
+            Write-Warn 'npm ci failed -- falling back to npm install'
             npm install
         }
         npm run build
@@ -96,7 +96,7 @@ if (-not (Test-Path $DistDir)) {
 # ──────────────────────────────────────────────
 # 2. Ensure target directories
 # ──────────────────────────────────────────────
-Write-Step 'Ensuring target directories …'
+Write-Step 'Ensuring target directories ...'
 foreach ($dir in @($TargetDir, $LogDir)) {
     if (-not (Test-Path $dir)) {
         New-Item -ItemType Directory -Path $dir -Force | Out-Null
@@ -113,14 +113,14 @@ foreach ($dir in @($TargetDir, $LogDir)) {
 Import-Module WebAdministration -ErrorAction SilentlyContinue
 
 if (Get-Module WebAdministration) {
-    Write-Step "Recycling app pool '$AppPoolName' …"
+    Write-Step "Recycling app pool '$AppPoolName' ..."
     $pool = Get-IISAppPool -Name $AppPoolName -ErrorAction SilentlyContinue
     if ($pool) {
         Stop-WebAppPool -Name $AppPoolName -ErrorAction SilentlyContinue
         Write-OK "Stopped $AppPoolName"
     }
     else {
-        Write-Warn "App pool '$AppPoolName' not found – it will need to be created in IIS."
+        Write-Warn "App pool '$AppPoolName' not found -- create it in IIS first."
     }
 }
 else {
@@ -130,7 +130,7 @@ else {
 # ──────────────────────────────────────────────
 # 4. Copy files
 # ──────────────────────────────────────────────
-Write-Step "Deploying files to $TargetDir …"
+Write-Step "Deploying files to $TargetDir ..."
 try {
     # Remove old content but keep the directory
     Get-ChildItem -Path $TargetDir -Recurse -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
@@ -146,7 +146,7 @@ catch {
 # ──────────────────────────────────────────────
 # 5. Set permissions (IIS_IUSRS read)
 # ──────────────────────────────────────────────
-Write-Step 'Setting NTFS permissions …'
+Write-Step 'Setting NTFS permissions ...'
 $acl = Get-Acl $TargetDir
 $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
     'IIS_IUSRS',
@@ -176,7 +176,7 @@ Write-OK "Granted Modify to IIS_IUSRS on $LogDir"
 # 6. Restart IIS app pool
 # ──────────────────────────────────────────────
 if (Get-Module WebAdministration) {
-    Write-Step "Starting app pool '$AppPoolName' …"
+    Write-Step "Starting app pool '$AppPoolName' ..."
     $pool = Get-IISAppPool -Name $AppPoolName -ErrorAction SilentlyContinue
     if ($pool) {
         Start-WebAppPool -Name $AppPoolName -ErrorAction SilentlyContinue
@@ -184,7 +184,7 @@ if (Get-Module WebAdministration) {
     }
 }
 else {
-    Write-Warn 'Skipped IIS restart – WebAdministration module not loaded.'
+    Write-Warn 'Skipped IIS restart -- WebAdministration module not loaded.'
 }
 
 # ──────────────────────────────────────────────
@@ -202,6 +202,6 @@ Write-Host "  1. Under '$SiteName', add an Application:"
 Write-Host "     Alias  : $AppName"
 Write-Host "     Pool   : $AppPoolName"
 Write-Host "     Path   : $TargetDir"
-Write-Host "  2. Ensure the app pool uses 'No Managed Code' (.NET CLR Version)."
-Write-Host "  3. If needed, add a web.config for the SPA fallback (HTML5 History mode)."
+Write-Host '  2. Set the app pool .NET CLR version to No Managed Code.'
+Write-Host '  3. A web.config for SPA fallback is already included in dist/.'
 Write-Host ''
