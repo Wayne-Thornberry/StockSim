@@ -10,6 +10,7 @@ export const useGameStore = defineStore('game', () => {
   const day = ref(1)
   const tick = ref(0)
   const speed = ref(1)
+  const lastSpeed = ref(1) // remembered speed for pause/resume
   const isRunning = ref(false)
   const gameStarted = ref(false)
   const notifications = ref([])
@@ -247,7 +248,13 @@ export const useGameStore = defineStore('game', () => {
   }
 
   function toggleRunning() {
-    isRunning.value = !isRunning.value
+    if (isRunning.value) {
+      lastSpeed.value = speed.value
+      isRunning.value = false
+    } else {
+      speed.value = lastSpeed.value || 1
+      isRunning.value = true
+    }
   }
 
   /** Record day-end snapshot for portfolio chart (always called, regardless of skip mode) */
@@ -281,6 +288,8 @@ export const useGameStore = defineStore('game', () => {
 
   function setSpeed(s) {
     speed.value = s
+    lastSpeed.value = s
+    isRunning.value = true
   }
 
   function advanceTick() {

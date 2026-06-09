@@ -94,11 +94,11 @@
           </div>
         </div>
         <div class="speed-controls">
-          <button class="btn btn-sm btn-play" @click="game.toggleRunning()" title="Pause/Play (Space)">{{ game.isRunning ? '⏸' : '▶' }}</button>
-          <button class="btn btn-sm" :class="{ 'btn-active': game.speed === 1 }" @click="game.setSpeed(1)" title="1x (1)">▶</button>
-          <button class="btn btn-sm" :class="{ 'btn-active': game.speed === 5 }" @click="game.setSpeed(5)" title="5x (2)">▶▶</button>
-          <button class="btn btn-sm" :class="{ 'btn-active': game.speed === 10 }" @click="game.setSpeed(10)" title="10x (3)">▶▶▶</button>
-          <button class="btn btn-sm" @click="skipToEOD" title="Skip to end of day (0)">⏭</button>
+          <button class="btn btn-sm" :class="{ 'btn-active': !game.isRunning }" @click="game.toggleRunning()" title="Pause/Resume (Space)">⏸</button>
+          <button class="btn btn-sm" :class="{ 'btn-active': game.isRunning && game.speed === 1 }" @click="game.setSpeed(1)" title="1x Speed (1)">▶ 1×</button>
+          <button class="btn btn-sm" :class="{ 'btn-active': game.isRunning && game.speed === 5 }" @click="game.setSpeed(5)" title="2x Speed (2)">▶▶ 2×</button>
+          <button class="btn btn-sm" :class="{ 'btn-active': game.isRunning && game.speed === 10 }" @click="game.setSpeed(10)" title="3x Speed (3)">▶▶▶ 3×</button>
+          <button class="btn btn-sm" @click="skipToEOD" title="End of Day (0)">⏭ EOD</button>
           <span class="skip-sep">|</span>
           <button class="btn btn-sm" @click="skipWeek">⏭ Week</button>
           <button class="btn btn-sm" @click="skipMonth">⏭ Month</button>
@@ -232,7 +232,7 @@
 </template>
 
 <script setup>
-import { onMounted, onUnmounted, watch, ref, computed } from 'vue'
+import { onMounted, onUnmounted, watch, ref, computed, nextTick } from 'vue'
 import { useGameStore } from '@/stores/gameStore.js'
 import { useMarketStore } from '@/stores/marketStore.js'
 import { usePortfolioStore } from '@/stores/portfolioStore.js'
@@ -353,7 +353,14 @@ function collectHighlights(lastNewsCount) {
 
 /** Run ticks in async chunks so the UI can update with a loading indicator */
 async function runTicksAsync(totalTicks, label) {
-  const CHUNK = 60
+  // Use fast-forward daily GBM instead of tick-by-tick — ~1000× faster
+  const TICKS_PER_DAY = game.TICKS_PER_DAY
+  const remainingToday = TICKS_PER_DAY - game.tick
+  const totalTicksAfterToday = totalTicks - remainingToday
+  const fullDays = Math.max(0, Math.floor(totalTicksAfterToday / TICKS_PER_DAY))
+  const leftoverTicks = totalTicksAfterToday - fullDays * TICKS_PER_DAY
+
+  // Show overlay immediately — must yield through Vue + browser render
   isSkipping.value = true
   skipLabel.value = label
   skipPct.value = 0
@@ -362,49 +369,54 @@ async function runTicksAsync(totalTicks, label) {
   cancelSkipFlag = false
   game.skipDayReports = true
   let lastNewsCount = market.newsFeed.length
+  await nextTick()
+  await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))
 
   const wasRunning = game.isRunning
   game.isRunning = true
 
   const startDay = game.day
-  let processed = 0
+  const totalDays = fullDays + (remainingToday > 0 && remainingToday < TICKS_PER_DAY ? 1 : 0) + (leftoverTicks > 0 ? 1 : 0)
 
-  while (processed < totalTicks) {
-    const batch = Math.min(CHUNK, totalTicks - processed)
-    for (let i = 0; i < batch; i++) {
-      gameLoop()
-    }
-    processed += batch
-    skipPct.value = Math.round((processed / totalTicks) * 100)
-
-    const currentDay = game.day
-    if (currentDay !== startDay) {
-      skipDetail.value = `Day ${currentDay} — ${game.currentDateStr}`
-    } else {
-      skipDetail.value = `${processed} / ${totalTicks} ticks`
-    }
-
-    // Collect highlights
-    const newHighlights = collectHighlights(lastNewsCount)
+  // 1. Finish current day with tick-by-tick (needed for intraday state)
+  if (remainingToday > 0 && remainingToday < TICKS_PER_DAY) {
+    for (let i = 0; i < remainingToday; i++) gameLoop()
+    skipPct.value = Math.round((1 / totalDays) * 100)
+    skipDetail.value = `Day ${game.day} — ${game.currentDateStr}`
+    const highlights = collectHighlights(lastNewsCount)
     lastNewsCount = market.newsFeed.length
-    if (newHighlights.length) {
-      skipHighlights.value = [...newHighlights, ...skipHighlights.value].slice(0, 30)
-    }
+    if (highlights.length) skipHighlights.value = [...highlights, ...skipHighlights.value].slice(0, 30)
+    await new Promise(r => setTimeout(r, 0))
+    if (cancelSkipFlag) { finishSkip(wasRunning); return }
+  }
 
-    // Check for cancel
-    if (cancelSkipFlag) {
-      game.addNotification('Time skip cancelled — you can now act on market events.', 'info')
-      break
-    }
-
-    // Yield to browser so the overlay renders
+  // 2. Fast-forward full days (synchronous, near-instant with daily GBM)
+  if (fullDays > 0) {
+    market.fastForwardDays(fullDays)
+    skipPct.value = Math.round(((1 + fullDays) / totalDays) * 100)
+    skipDetail.value = `Day ${game.day} — ${game.currentDateStr}`
+    const highlights = collectHighlights(lastNewsCount)
+    lastNewsCount = market.newsFeed.length
+    if (highlights.length) skipHighlights.value = [...highlights, ...skipHighlights.value].slice(0, 30)
     await new Promise(r => setTimeout(r, 0))
   }
 
+  // 3. Leftover ticks on the last partial day
+  if (leftoverTicks > 0) {
+    for (let i = 0; i < leftoverTicks; i++) gameLoop()
+    skipPct.value = 100
+    skipDetail.value = `Day ${game.day} — ${game.currentDateStr}`
+    const highlights = collectHighlights(lastNewsCount)
+    if (highlights.length) skipHighlights.value = [...highlights, ...skipHighlights.value].slice(0, 30)
+  }
+
+  finishSkip(wasRunning)
+}
+
+function finishSkip(wasRunning) {
   game.isRunning = wasRunning
   game.skipDayReports = false
   isSkipping.value = false
-  // Show start-of-day report after skip completes
   game.recordDayStart()
   game.showDayReport = true
   game.dayReportType = 'start'

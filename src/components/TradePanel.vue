@@ -22,7 +22,7 @@
     <div :class="chartRange === 'ALL' ? 'chart-scroll' : ''" :style="chartRange === 'ALL' ? { width: '100%', overflowX: 'auto' } : {}">
       <div :style="chartRange === 'ALL' ? { minWidth: Math.max(chartData.length * 3, 300) + 'px' } : {}">
         <StockChart :priceHistory="chartData" :label="portfolioMode ? 'Net Worth' : isIndex ? indexName : stock.name" :color="portfolioMode ? (portfolio.totalProfitLoss >= 0 ? '#4ade80' : '#f87171') : chg.d1 >= 0 ? '#4ade80' : '#f87171'"
-          :height="180" :startDate="game.startDate" :chartMode="(chartRange === '1H' || chartRange === '1D') ? 'intraday' : 'daily'" />
+          :height="180" :startDate="game.startDate" :chartMode="(chartRange === '1H' || chartRange === '1D') ? 'intraday' : 'daily'" :chartRange="chartRange" />
       </div>
     </div>
 

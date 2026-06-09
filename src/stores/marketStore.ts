@@ -5,7 +5,7 @@ import { buildFullCalendar, generateNewsHint, generateEventResult, EVENT_DEFS } 
 import { pickWorldEvent, applyWorldEvent, resetWorldEvents } from '@/utils/worldEvents.js'
 import { REGIONS } from '@/data/companies.js'
 import { generateCompanies, generateIndexes, generateCommodities } from '@/utils/companyGenerator.js'
-import { seedRng } from '@/utils/seededRng.js'
+import { seedRng, randomNormal } from '@/utils/seededRng.js'
 import { simulateHistory } from '@/utils/simulationEngine.js'
 import { useGameStore } from './gameStore.js'
 import { useCurrencyStore } from './currencyStore.js'
@@ -568,6 +568,143 @@ export const useMarketStore = defineStore('market', () => {
     }
   }
 
+  /**
+   * Fast-forward N trading days using daily GBM (not tick-by-tick).
+   * Runs the same day-rollover logic as tickAll but replaces 390 ticks/day
+   * with a single daily price step — ~1000× faster for week/month skips.
+   */
+  function fastForwardDays(numDays: number) {
+    const gameStore = useGameStore()
+    const portfolioStore = usePortfolioStore()
+
+    for (let d = 0; d < numDays; d++) {
+      // --- Per-tick checks (once per day is enough) ---
+      portfolioStore.checkOrders()
+      useInfluenceStore().tick()
+
+      const event = checkMarketEvent()
+      if (event) {
+        gameStore.setMarketEvent(event)
+        gameStore.addNotification(event.name, event.type === 'crash' ? 'error' : 'warning')
+      }
+
+      // --- Daily price step for all stocks ---
+      const dt = 1 / 252
+      for (const id of Object.keys(stocks.value)) {
+        const s = stocks.value[id]
+        if (s.bankrupt) continue
+
+        // Daily GBM: same formula as stepDaily in simulationEngine
+        let drift = (s.trend || 0) * dt
+        if (gameStore.marketEvent) {
+          if (gameStore.marketEvent.type === 'bull') drift += 0.003 * dt * 50
+          else if (gameStore.marketEvent.type === 'bear') drift -= 0.003 * dt * 50
+          else if (gameStore.marketEvent.type === 'crash') drift -= 0.02 * dt * 50
+        }
+        const shock = (s.volatility || 0.02) * Math.sqrt(dt) * randomNormal()
+        const newPrice = round2(Math.max(0.01, s.currentPrice * Math.exp(drift + shock)))
+
+        // Synthesize OHLC from open→close movement
+        const move = Math.abs(newPrice - s.currentPrice)
+        s.dayHigh = round2(Math.max(s.dayHigh, Math.max(s.currentPrice, newPrice) + move * 0.01))
+        s.dayLow = round2(Math.min(s.dayLow, Math.min(s.currentPrice, newPrice) - move * 0.01))
+        s.currentPrice = newPrice
+        s._dailyVolume = (s._dailyVolume || 0) + Math.max(100, Math.floor(move / s.currentPrice * (s.outstandingShares || 1) * 0.001))
+
+        // Stock split check
+        if (s.currentPrice > 1000 && (s as any).type !== 'commodity') {
+          s.currentPrice = round2(s.currentPrice / 2)
+          s.outstandingShares = Math.floor(s.outstandingShares * 2)
+          s.dayOpen = round2(s.dayOpen / 2)
+          s.dayHigh = round2(s.dayHigh / 2)
+          s.dayLow = round2(s.dayLow / 2)
+          for (let phi = 0; phi < s.priceHistory.length; phi++) {
+            s.priceHistory[phi].price = round2(s.priceHistory[phi].price / 2)
+          }
+          for (const bar of s.historicalDaily || []) {
+            bar.open = round2(bar.open / 2); bar.high = round2(bar.high / 2)
+            bar.low = round2(bar.low / 2); bar.close = round2(bar.close / 2)
+          }
+        }
+      }
+
+      // --- Day rollover ---
+      gameStore.day++
+      gameStore.tick = 0
+
+      for (const id of Object.keys(stocks.value)) {
+        const s = stocks.value[id]
+        if (s._dailyVolume > 0) {
+          if (!s.volumeHistory) s.volumeHistory = []
+          s.volumeHistory.push({ day: gameStore.day - 1, volume: s._dailyVolume })
+          if (s.volumeHistory.length > 60) s.volumeHistory.shift()
+        }
+        s._dailyVolume = 0
+        recordDailySnapshot(s, gameStore.day)
+        s.dayOpen = s.currentPrice
+        s.dayHigh = s.currentPrice
+        s.dayLow = s.currentPrice
+        s._regHigh = s.currentPrice
+        s._regLow = s.currentPrice
+      }
+
+      recordBenchmarkSnapshot()
+      processDayEvents(gameStore.day)
+      generateUpcomingHints(gameStore.day)
+
+      // World events
+      if (activeWorldEvent.value) {
+        activeWorldEvent.value.remaining--
+        if (activeWorldEvent.value.remaining <= 0) {
+          gameStore.addNotification(`🌍 ${activeWorldEvent.value.name} — effects have subsided.`, 'info')
+          activeWorldEvent.value = null
+        }
+      }
+      if (!activeWorldEvent.value && gameStore.day >= nextWorldEventDay) {
+        const wevt = pickWorldEvent()
+        activeWorldEvent.value = { ...wevt, remaining: wevt.duration }
+        applyWorldEvent(wevt, stocks.value, gameStore.day, newsFeed.value)
+        gameStore.addNotification(`🌍 World Event: ${wevt.name} — ${wevt.description?.substring(0, 80)}...`, 'warning')
+        nextWorldEventDay = gameStore.day + 15 + Math.floor(Math.random() * 35)
+      }
+
+      gameStore.accrueLoanInterest()
+      gameStore.accrueMarginInterest()
+      gameStore.checkBankruptcy()
+      portfolioStore.checkFutures()
+      chargeExpenseRatios(gameStore.day)
+
+      if (gameStore.day - (gameStore.lastRateChange || 0) > 30) {
+        const change = (Math.random() - 0.5) * 0.01
+        gameStore.interestRate = round2(Math.max(0.01, Math.min(0.15, gameStore.interestRate + change)))
+        gameStore.lastRateChange = gameStore.day
+      }
+
+      if (gameStore.day % 63 === 0) {
+        gameStore.addNotification('📊 Index ETFs rebalanced — constituent weights updated', 'info')
+      }
+
+      prevDay = gameStore.day
+    }
+
+    // Generate minimal intraday history for the last day so charts render
+    for (const id of Object.keys(stocks.value)) {
+      const s = stocks.value[id]
+      if (s.bankrupt) continue
+      const startPrice = s.dayOpen
+      const endPrice = s.currentPrice
+      for (let t = 0; t < 5; t++) {
+        const frac = (t + 1) / 5
+        s.priceHistory.push({
+          time: gameStore.day * 1000 + t,
+          price: round2(startPrice + (endPrice - startPrice) * frac)
+        })
+      }
+    }
+
+    gameStore.recordDayStart()
+  }
+
   /** Get the IDs of companies in a given index (handles dynamic indexes by sector) */
   function getIndexCompanyIds(indexId) {
     const idx = activeIndexes.value.find(i => i.id === indexId)
@@ -860,7 +997,7 @@ export const useMarketStore = defineStore('market', () => {
     eventLog, addEventLogEntry,
     benchmarkHistory,
     activeCompanies, activeIndexes,
-    init, getStock, ticker, tickAll,
+    init, getStock, ticker, tickAll, fastForwardDays,
     getIndexValue, getIndexChange, getIndexPriceChange, getIndexStocks,
     getBenchmarkValue, getBenchmarkChange, getBenchmarkPriceChange, getBenchmarkInfo,
     allStocks,
